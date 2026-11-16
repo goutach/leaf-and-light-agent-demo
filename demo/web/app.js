@@ -29,15 +29,23 @@ function entry(who, text, sources = [], mode = '', usesContext = false) {
   const message = document.createElement('p');
   message.textContent = text;
   row.append(message);
-  for (const source of sources) {
-    const reference = document.createElement('small');
-    reference.textContent = `Из справочника · ${source}`;
-    row.append(reference);
-  }
-  if (mode) {
-    const evidence = document.createElement('small');
-    evidence.className = 'route';
-    evidence.textContent = mode + (usesContext ? ' · учтен предыдущий вопрос' : '');
+  if (sources.length) {
+    const evidence = document.createElement('details');
+    evidence.className = 'evidence';
+    const label = document.createElement('summary');
+    label.textContent = sources.length === 1 ? 'Источник ответа' : 'Источники ответа';
+    evidence.append(label);
+    for (const source of sources) {
+      const reference = document.createElement('small');
+      reference.textContent = source;
+      evidence.append(reference);
+    }
+    if (mode) {
+      const route = document.createElement('small');
+      route.className = 'route';
+      route.textContent = mode + (usesContext ? ' · учтен предыдущий вопрос' : '');
+      evidence.append(route);
+    }
     row.append(evidence);
   }
   historyPanel.append(row);
@@ -48,7 +56,7 @@ function entry(who, text, sources = [], mode = '', usesContext = false) {
 function welcome() {
   historyPanel.replaceChildren();
   historyPanel.dataset.snapshot = '';
-  entry('agent', 'Здравствуйте! Отвечу про аренду растений и помогу оставить заявку.');
+  entry('agent', 'Здравствуйте! Подскажу по аренде и уходу за растениями.');
 }
 
 async function request(url, options) {
@@ -163,7 +171,7 @@ async function send(text) {
   [submit, reset, ...shortcuts].forEach(button => { button.disabled = true; });
   input.value = '';
   const row = entry('user', text);
-  const pending = ownedLead ? null : entry('agent', 'Проверяю…');
+  const pending = ownedLead ? null : entry('agent', 'Секунду…');
   const event = clientRetry?.text === text ? clientRetry.event : newId();
   clientRetry = {text, event};
   try {

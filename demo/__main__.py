@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from .agent import Agent, NAME, configured_router
+from .agent import Agent, HANDOFF_CONFIRMED, NAME, configured_router
 
 
 WEB = Path(__file__).with_name("web")
@@ -75,6 +75,8 @@ class LeadStore:
                 db.executemany("INSERT INTO lead_messages (lead_id,role,text,event) VALUES (?,?,?,?)",
                                ((lead["id"], row["role"], row["text"], event if index == len(history) - 1 else None)
                                 for index, row in enumerate(history)))
+                db.execute("INSERT INTO lead_messages (lead_id,role,text) VALUES (?, 'agent', ?)",
+                           (lead["id"], HANDOFF_CONFIRMED))
             return dict(lead)
 
     def list(self):

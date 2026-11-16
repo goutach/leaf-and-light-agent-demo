@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from demo.__main__ import LeadStore, build_servers
-from demo.agent import Agent, FAQ, ModelRouter, route_by_keywords
+from demo.agent import Agent, FAQ, HANDOFF_CONFIRMED, ModelRouter, route_by_keywords
 
 
 def request(url, body=None):
@@ -108,12 +108,36 @@ class DemoTest(unittest.TestCase):
             self.assertTrue(request(self.url + "/api/reply", message)["saved"])
         dialog = request(self.url + "/api/dialog?session=" + session)
         self.assertEqual(dialog, request(self.url + "/api/dialog?lead_id=1"))
-        self.assertEqual([r["role"] for r in dialog["messages"]], ["user", "agent", "user", "agent", "user", "user", "manager"])
+        self.assertEqual([r["role"] for r in dialog["messages"]], ["user", "agent", "user", "agent", "user", "agent", "user", "manager"])
+        self.assertEqual(dialog["messages"][-3]["text"], HANDOFF_CONFIRMED)
         self.assertEqual(dialog["messages"][-1]["text"], message["message"])
         self.assertEqual(request(self.url + "/api/dialog?session=" + other)["messages"], [])
         with self.assertRaises(HTTPError) as error:
             request(self.url + "/api/reply", {**message, "message": "Некорректный повтор"})
         self.assertEqual(error.exception.code, 409)
+
+    def test_explicit_handoff_keeps_the_reason_and_waits_for_both_contacts(self):
+        self.assertEqual(self.chat("Можно оформить счет на юрлицо?")["kind"], "unknown")
+        self.assertIn("Как к вам обращаться", self.chat("Позовите менеджера, пожалуйста")["text"])
+        self.assertIn("номер телефона", self.chat("Анна")["text"])
+        self.assertEqual(self.chat("Когда привезете?")["kind"], "faq")
+        self.assertEqual(self.leads(), [])
+        self.assertEqual(self.chat("+7 900 000-00-01")["text"], HANDOFF_CONFIRMED)
+        lead = self.leads()[0]
+        self.assertEqual(lead["name"], "Анна")
+        self.assertEqual(lead["request"], "Можно оформить счет на юрлицо?")
+
+    def test_quoted_conditional_and_cancelled_handoff_are_not_actions(self):
+        quoted = 'Пример: «Позовите менеджера. Меня зовут Анна, +7 900 000-00-01»'
+        for text in (quoted, "Если скажу позднее, позовите менеджера.", "Позовите менеджера. Отмена."):
+            self.assertNotEqual(self.chat(text)["kind"], "contact")
+        self.assertEqual(self.leads(), [])
+
+    def test_accept_handoff_offer_and_cancel(self):
+        self.chat("Можно оплатить картой?")
+        self.assertEqual(self.chat("Да, давайте")["kind"], "contact")
+        self.assertEqual(self.chat("отмена")["text"], "Хорошо, заявку не отправляю.")
+        self.assertEqual(self.leads(), [])
 
     def test_model_output_cannot_override_catalogue(self):
         calls = []

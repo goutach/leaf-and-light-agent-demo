@@ -15,6 +15,8 @@ class LiveSemanticTest(unittest.TestCase):
     def test_paraphrase_and_two_sources(self):
         self.assertEqual(self.ids("Сотрудникам придется самим следить за грунтом?"), ["care"])
         self.assertEqual(self.ids("Через сколько дней кашпо окажутся в офисе?"), ["delivery"])
+        self.assertEqual(self.ids("Сколько у вас стоит одно растение в месяц?"), ["price"])
+        self.assertEqual(self.ids("А можно только одно растение?"), ["minimum"])
         self.assertEqual(self.ids("Сколько будет стоить аренда и как часто приходит специалист?"), ["price", "care"])
 
     def test_context(self):
