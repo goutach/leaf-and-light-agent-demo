@@ -16,7 +16,7 @@
     <div class="panels">
       <section class="panel chat" aria-labelledby="chat-title">
         <div class="panel-header">
-          <h1 id="chat-title">Чат с консультантом</h1>
+          <div><h1 id="chat-title">Чат с консультантом</h1><p id="chat-status" class="muted" aria-live="polite" hidden></p></div>
           <button id="reset" type="button" class="plain">Новый диалог</button>
         </div>
         <div id="history" role="log" aria-label="Переписка" tabindex="0"></div>
@@ -37,6 +37,16 @@
           <button type="button" class="plain" id="refresh">Обновить</button>
         </div>
         <div id="lead-list" aria-live="polite"></div>
+        <section id="manager-dialog" aria-labelledby="manager-title" hidden>
+          <h3 id="manager-title">Переписка по заявке</h3>
+          <div id="manager-history" role="log" aria-label="История в СРМ" tabindex="0"></div>
+          <form id="manager-form">
+            <label class="visually-hidden" for="manager-message">Ответ менеджера</label>
+            <input id="manager-message" placeholder="Ответ клиенту" maxlength="1000" autocomplete="off" required>
+            <button id="manager-send" type="submit">Ответить</button>
+          </form>
+          <p id="manager-status" class="muted" role="status" hidden></p>
+        </section>
       </section>
     </div>
   </main>

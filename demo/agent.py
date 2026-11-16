@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
 
 
 FAQ = json.loads(Path(__file__).with_name("faq.json").read_text(encoding="utf-8"))
@@ -89,6 +90,7 @@ class Contact:
     name: str = ""
     phone: str = ""
     request: str = ""
+    awaiting_confirmation: bool = False
 
 
 class Agent:
@@ -98,15 +100,46 @@ class Agent:
         self.faq = {row["id"]: row for row in FAQ}
         self.contacts = {}
         self.questions = {}
+        self.history = {}
+        self.session_locks = {}
         self.lock = threading.RLock()
 
-    def chat(self, session, message):
-        message = message.strip()
+    def chat(self, session, message, event=None):
+        with self.lock:
+            session_lock = self.session_locks.setdefault(session, threading.Lock())
+        with session_lock:
+            return self._chat(session, message.strip(), event or str(uuid4()))
+
+    def _chat(self, session, message, event):
+        saved = self.crm.dialog(session=session)
+        if saved["lead_id"]:
+            lead_id = saved["lead_id"]
+            pending = self.contacts.pop(session, None)
+            self.history.pop(session, None)
+            self.questions.pop(session, None)
+            if pending and pending.awaiting_confirmation and message.casefold() == "повторить":
+                return self._receipt(lead_id)
+            if not self.crm.append(lead_id, "user", message, event):
+                raise ValueError("Сообщение не сохранено")
+            return {"kind": "manager", "lead_id": lead_id}
+
+        history = self.history.setdefault(session, [])
+        history.append({"role": "user", "text": message})
+        if len(history) > 20:
+            del history[:-20]
+        result = self._answer(session, message, event, history)
+        if result["kind"] == "lead":
+            self.history.pop(session, None)
+            self.questions.pop(session, None)
+        else:
+            history.append({"role": "agent", "text": result["text"]})
+        return result
+
+    def _answer(self, session, message, event, history):
         number = PHONE.search(message)
         named = NAMED.search(message)
-        with self.lock:
-            if session in self.contacts or CONTACT.search(message) or number or named:
-                return self._contact(session, message, number, named)
+        if session in self.contacts or CONTACT.search(message) or number or named:
+            return self._contact(session, message, number, named, event, history)
 
         previous = self.questions.get(session, "")
         trace = []
@@ -128,7 +161,7 @@ class Agent:
                     "trace": trace, "mode": mode}
         return {"kind": "unknown", "text": UNKNOWN, "mode": mode}
 
-    def _contact(self, session, message, number, named):
+    def _contact(self, session, message, number, named, event, history):
         if message.casefold() in {"отмена", "отменить заявку"}:
             self.contacts.pop(session, None)
             return {"kind": "contact", "text": "Остановил заполнение заявки."}
@@ -153,8 +186,14 @@ class Agent:
             return {"kind": "contact", "text": prompt}
         request_id = hashlib.sha256(f"{session}\n{contact.name.casefold()}\n{contact.phone}".encode()).hexdigest()
         try:
-            lead_id = self.crm.create(request_id, contact.name, contact.phone, contact.request[:300])["id"]
+            lead_id = self.crm.create(request_id, contact.name, contact.phone, contact.request[:300],
+                                      session, history, event)["id"]
         except (URLError, TimeoutError, ValueError, KeyError, TypeError):
+            contact.awaiting_confirmation = True
             return {"kind": "contact", "text": "СРМ пока не подтвердила запись. Напишите «повторить», чтобы проверить отправку."}
         del self.contacts[session]
+        return self._receipt(lead_id)
+
+    @staticmethod
+    def _receipt(lead_id):
         return {"kind": "lead", "text": f"Заявка №{lead_id} сохранена в тестовой СРМ.", "lead_id": lead_id}

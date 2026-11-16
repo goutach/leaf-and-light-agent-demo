@@ -78,6 +78,9 @@ class DemoTest(unittest.TestCase):
         class InterruptedCRM:
             first = True
 
+            def dialog(self, **kwargs):
+                return client.dialog(**kwargs)
+
             def create(self, *args):
                 result = client.create(*args)
                 if self.first:
@@ -89,6 +92,28 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(self.chat("Анна +7 900 000-00-01")["kind"], "contact")
         self.assertEqual(self.chat("повторить")["kind"], "lead")
         self.assertEqual(len(client.list()["leads"]), 1)
+
+    def test_handoff_history_and_manager_reply_are_scoped_and_persistent(self):
+        session = "demo-test-session-001"
+        other = "demo-test-session-002"
+        self.chat("Сколько стоит аренда?", session)
+        self.chat("Нужны растения в офис. Меня зовут Анна.", session)
+        self.assertEqual(self.leads(), [])
+        self.assertEqual(self.chat("+7 900 000-00-01", session)["lead_id"], 1)
+        self.assertEqual(self.leads()[0]["request"], "Нужны растения в офис")
+        restarted = Agent(self.app.agent.crm, lambda *_: self.fail("Бот не отвечает после передачи"))
+        self.assertEqual(restarted.chat(session, "Фото офиса подойдет?")["kind"], "manager")
+        message = {"lead_id": 1, "message": "Да, пришлите фото зоны у окна.", "event": "manager-reply-demo-001"}
+        for _ in range(2):
+            self.assertTrue(request(self.url + "/api/reply", message)["saved"])
+        dialog = request(self.url + "/api/dialog?session=" + session)
+        self.assertEqual(dialog, request(self.url + "/api/dialog?lead_id=1"))
+        self.assertEqual([r["role"] for r in dialog["messages"]], ["user", "agent", "user", "agent", "user", "user", "manager"])
+        self.assertEqual(dialog["messages"][-1]["text"], message["message"])
+        self.assertEqual(request(self.url + "/api/dialog?session=" + other)["messages"], [])
+        with self.assertRaises(HTTPError) as error:
+            request(self.url + "/api/reply", {**message, "message": "Некорректный повтор"})
+        self.assertEqual(error.exception.code, 409)
 
     def test_model_output_cannot_override_catalogue(self):
         calls = []

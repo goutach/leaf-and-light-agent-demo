@@ -6,7 +6,21 @@ const reset = document.querySelector('#reset');
 const shortcuts = [...document.querySelectorAll('[data-prompt]')];
 const leadList = document.querySelector('#lead-list');
 const refresh = document.querySelector('#refresh');
-let session = crypto.randomUUID();
+const chatStatus = document.querySelector('#chat-status');
+const managerDialog = document.querySelector('#manager-dialog');
+const managerTitle = document.querySelector('#manager-title');
+const managerHistory = document.querySelector('#manager-history');
+const managerInput = document.querySelector('#manager-message');
+const managerSend = document.querySelector('#manager-send');
+const managerStatus = document.querySelector('#manager-status');
+const newId = () => crypto.randomUUID();
+let session = sessionStorage.getItem('leaf-session') || newId();
+sessionStorage.setItem('leaf-session', session);
+let ownedLead = null;
+let selectedLead = null;
+let clientRetry = null;
+let managerRetry = null;
+let managerBusy = false;
 let busy = false;
 
 function entry(who, text, sources = [], mode = '', usesContext = false) {
@@ -33,6 +47,7 @@ function entry(who, text, sources = [], mode = '', usesContext = false) {
 
 function welcome() {
   historyPanel.replaceChildren();
+  historyPanel.dataset.snapshot = '';
   entry('agent', 'Здравствуйте! Отвечу про аренду растений и помогу оставить заявку.');
 }
 
@@ -41,6 +56,62 @@ async function request(url, options) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Не удалось выполнить запрос');
   return data;
+}
+
+function post(url, body) {
+  return request(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+}
+
+function renderTranscript(panel, messages) {
+  const snapshot = JSON.stringify(messages);
+  if (panel.dataset.snapshot === snapshot) return;
+  panel.dataset.snapshot = snapshot;
+  const labels = {user: 'Клиент', agent: 'Ассистент', manager: 'Менеджер'};
+  panel.replaceChildren(...messages.map(item => {
+    const row = document.createElement('div');
+    row.className = `turn ${item.role}`;
+    const label = document.createElement('small');
+    label.textContent = labels[item.role];
+    const message = document.createElement('p');
+    message.textContent = item.text;
+    row.append(label, message);
+    return row;
+  }));
+  panel.scrollTop = panel.scrollHeight;
+}
+
+async function refreshClientDialog() {
+  const current = session;
+  const dialog = await request('/api/dialog?' + new URLSearchParams({session: current}));
+  if (current !== session || !dialog.lead_id) return;
+  ownedLead = dialog.lead_id;
+  chatStatus.textContent = `Заявка №${ownedLead} · передано менеджеру`;
+  chatStatus.hidden = false;
+  shortcuts.forEach(button => { button.hidden = true; });
+  renderTranscript(historyPanel, dialog.messages);
+}
+
+async function refreshManagerDialog(id) {
+  const dialog = await request('/api/dialog?' + new URLSearchParams({lead_id: id}));
+  if (id !== selectedLead || !dialog.lead_id) return;
+  renderTranscript(managerHistory, dialog.messages);
+}
+
+async function openDialog(id) {
+  if (id === selectedLead) return;
+  selectedLead = id;
+  managerDialog.hidden = false;
+  managerTitle.textContent = `Заявка №${id} · переписка`;
+  managerHistory.textContent = 'Загружаю переписку…';
+  managerHistory.dataset.snapshot = '';
+  managerInput.value = '';
+  managerStatus.hidden = true;
+  managerRetry = null;
+  try {
+    await refreshManagerDialog(id);
+  } catch {
+    if (id === selectedLead) managerHistory.textContent = 'Переписка пока недоступна. Обновите список.';
+  }
 }
 
 async function updateLeads() {
@@ -69,6 +140,14 @@ async function updateLeads() {
         request.textContent = lead.request;
         row.append(request);
       }
+      if (lead.has_dialog) {
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'plain';
+        open.textContent = 'Открыть переписку';
+        open.addEventListener('click', () => openDialog(lead.id));
+        row.append(open);
+      }
       leadList.append(row);
     }
   } catch {
@@ -84,21 +163,29 @@ async function send(text) {
   [submit, reset, ...shortcuts].forEach(button => { button.disabled = true; });
   input.value = '';
   const row = entry('user', text);
-  const pending = entry('agent', 'Проверяю…');
+  const pending = ownedLead ? null : entry('agent', 'Проверяю…');
+  const event = clientRetry?.text === text ? clientRetry.event : newId();
+  clientRetry = {text, event};
   try {
-    const result = await request('/api/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({session, message: text}),
-    });
-    pending.remove();
-    entry('agent', result.text, result.sources, result.mode, result.trace?.some(row => row.context));
-    if (result.kind === 'lead') await updateLeads();
+    const result = await post('/api/chat', {session, message: text, event});
+    pending?.remove();
+    clientRetry = null;
+    if (result.kind === 'lead' || result.kind === 'manager') {
+      ownedLead = result.lead_id;
+      historyPanel.dataset.snapshot = '';
+      await refreshClientDialog();
+      if (result.kind === 'lead') await updateLeads();
+      if (selectedLead === ownedLead) await refreshManagerDialog(ownedLead);
+    } else {
+      entry('agent', result.text, result.sources, result.mode, result.trace?.some(row => row.context));
+    }
   } catch {
     row.remove();
-    pending.remove();
-    input.value ||= text;
-    entry('agent', 'Ответ не загрузился. Повторите отправку сообщения.');
+    pending?.remove();
+    if (clientRetry) {
+      input.value ||= text;
+      entry('agent', 'Запись пока не подтверждена. Повторите отправку того же сообщения.');
+    }
   } finally {
     busy = false;
     [submit, reset, ...shortcuts].forEach(button => { button.disabled = false; });
@@ -106,9 +193,58 @@ async function send(text) {
   }
 }
 
+document.querySelector('#manager-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const lead = selectedLead;
+  const message = managerInput.value.trim();
+  if (!lead || !message || managerBusy) return;
+  managerBusy = true;
+  managerSend.disabled = true;
+  managerStatus.hidden = true;
+  const key = managerRetry?.lead === lead && managerRetry?.message === message ? managerRetry.key : newId();
+  managerRetry = {lead, message, key};
+  try {
+    await post('/api/reply', {lead_id: lead, message, event: key});
+    managerRetry = null;
+    if (lead === selectedLead) {
+      managerInput.value = '';
+      managerStatus.textContent = 'Ответ в переписке клиента';
+      managerStatus.hidden = false;
+      await refreshManagerDialog(lead);
+    }
+    if (lead === ownedLead) await refreshClientDialog();
+  } catch {
+    if (lead === selectedLead && managerRetry) {
+      managerStatus.textContent = 'Отправка пока не подтверждена. Повторите ответ с тем же текстом.';
+      managerStatus.hidden = false;
+    }
+  } finally {
+    managerBusy = false;
+    managerSend.disabled = false;
+  }
+});
+
 form.addEventListener('submit', event => { event.preventDefault(); send(input.value); });
-refresh.addEventListener('click', updateLeads);
-reset.addEventListener('click', () => { session = crypto.randomUUID(); input.value = ''; welcome(); input.focus(); });
+refresh.addEventListener('click', () => {
+  updateLeads();
+  if (selectedLead) refreshManagerDialog(selectedLead).catch(() => {});
+});
+reset.addEventListener('click', () => {
+  session = newId();
+  sessionStorage.setItem('leaf-session', session);
+  ownedLead = null;
+  clientRetry = null;
+  chatStatus.hidden = true;
+  shortcuts.forEach(button => { button.hidden = false; });
+  input.value = '';
+  welcome();
+  input.focus();
+});
 shortcuts.forEach(button => button.addEventListener('click', () => send(button.dataset.prompt)));
 welcome();
 updateLeads();
+refreshClientDialog().catch(() => {});
+setInterval(() => {
+  if (ownedLead && !busy) refreshClientDialog().catch(() => {});
+  if (selectedLead && !managerBusy) refreshManagerDialog(selectedLead).catch(() => {});
+}, 2000);

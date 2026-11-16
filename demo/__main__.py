@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from urllib.error import URLError
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .agent import Agent, NAME, configured_router
@@ -17,6 +17,15 @@ from .agent import Agent, NAME, configured_router
 
 WEB = Path(__file__).with_name("web")
 MAX_BODY = 12_288
+SESSION = re.compile(r"[a-zA-Z0-9-]{16,80}")
+
+
+def valid_text(value, limit=1000):
+    return isinstance(value, str) and 0 < len(value.strip()) <= limit
+
+
+def valid_session(value):
+    return isinstance(value, str) and SESSION.fullmatch(value)
 
 
 class LeadStore:
@@ -32,42 +41,93 @@ class LeadStore:
                 request TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )""")
-            if "request" not in {row["name"] for row in db.execute("PRAGMA table_info(leads)")}:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(leads)")}
+            if "request" not in columns:
                 db.execute("ALTER TABLE leads ADD COLUMN request TEXT NOT NULL DEFAULT ''")
+            if "session" not in columns:
+                db.execute("ALTER TABLE leads ADD COLUMN session TEXT")
+            db.executescript("""
+                CREATE UNIQUE INDEX IF NOT EXISTS leads_session ON leads(session);
+                CREATE TABLE IF NOT EXISTS lead_messages (
+                    id INTEGER PRIMARY KEY,
+                    lead_id INTEGER NOT NULL REFERENCES leads(id),
+                    role TEXT NOT NULL CHECK(role IN ('user', 'agent', 'manager')),
+                    text TEXT NOT NULL,
+                    event TEXT,
+                    UNIQUE(lead_id, event)
+                );
+                CREATE INDEX IF NOT EXISTS lead_messages_by_lead ON lead_messages(lead_id, id);
+            """)
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys = ON")
         return db
 
-    def create(self, request_id, name, phone, request):
+    def create(self, request_id, name, phone, request, session, history, event):
         with closing(self.connect()) as db, db:
-            db.execute("""INSERT INTO leads (request_id,name,phone,request,created_at) VALUES (?,?,?,?,?)
-                ON CONFLICT(request_id) DO NOTHING""", (request_id, name, phone, request, datetime.now(timezone.utc).isoformat(timespec="seconds")))
-            return dict(db.execute("SELECT id,name,phone,request,created_at FROM leads WHERE request_id=?", (request_id,)).fetchone())
+            created = db.execute("""INSERT INTO leads (request_id,name,phone,request,created_at,session)
+                VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING""",
+                (request_id, name, phone, request, datetime.now(timezone.utc).isoformat(timespec="seconds"), session))
+            lead = db.execute("SELECT id FROM leads WHERE session=?", (session,)).fetchone()
+            if created.rowcount:
+                db.executemany("INSERT INTO lead_messages (lead_id,role,text,event) VALUES (?,?,?,?)",
+                               ((lead["id"], row["role"], row["text"], event if index == len(history) - 1 else None)
+                                for index, row in enumerate(history)))
+            return dict(lead)
 
     def list(self):
         with closing(self.connect()) as db:
-            return [dict(row) for row in db.execute("SELECT id,name,phone,request,created_at FROM leads ORDER BY id DESC LIMIT 30")]
+            return [dict(row) for row in db.execute("""SELECT id,name,phone,request,created_at,
+                session IS NOT NULL AS has_dialog FROM leads ORDER BY id DESC LIMIT 30""")]
+
+    def dialog(self, session, lead_id):
+        with closing(self.connect()) as db:
+            lead = db.execute("SELECT id FROM leads WHERE session IS NOT NULL AND (session=? OR id=?)",
+                              (session, lead_id)).fetchone()
+            if lead is None:
+                return {"lead_id": None, "messages": []}
+            messages = db.execute("SELECT role,text FROM lead_messages WHERE lead_id=? ORDER BY id", (lead["id"],))
+            return {"lead_id": lead["id"], "messages": [dict(row) for row in messages]}
+
+    def append(self, lead_id, role, text, event):
+        with closing(self.connect()) as db, db:
+            result = db.execute("""INSERT INTO lead_messages(lead_id,role,text,event)
+                SELECT id,?,?,? FROM leads WHERE id=? AND session IS NOT NULL
+                ON CONFLICT(lead_id,event) DO NOTHING""", (role, text, event, lead_id))
+            if result.rowcount:
+                return True
+            saved = db.execute("SELECT role,text FROM lead_messages WHERE lead_id=? AND event=?",
+                               (lead_id, event)).fetchone()
+            return saved is not None and tuple(saved) == (role, text)
 
 
 class CRMClient:
     def __init__(self, port, token):
-        self.url = f"http://127.0.0.1:{port}/api/leads"
+        self.url = f"http://127.0.0.1:{port}/api/"
         self.token = token
 
-    def request(self, payload=None):
-        data = None if payload is None else json.dumps(payload).encode()
+    def request(self, path, payload=None):
+        data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}
-        request = Request(self.url, headers=headers, data=data)
+        request = Request(self.url + path, headers=headers, data=data)
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
-    def create(self, request_id, name, phone, request):
-        return self.request({"request_id": request_id, "name": name, "phone": phone, "request": request})
+    def create(self, request_id, name, phone, request, session, history, event):
+        return self.request("leads", {"request_id": request_id, "name": name, "phone": phone, "request": request,
+                                      "session": session, "history": history, "event": event})
 
     def list(self):
-        return self.request()
+        return self.request("leads")
+
+    def dialog(self, *, session=None, lead_id=None):
+        query = {"session": session} if session is not None else {"lead_id": lead_id}
+        return self.request("dialog?" + urlencode(query))
+
+    def append(self, lead_id, role, text, event):
+        return self.request("dialog", {"lead_id": lead_id, "role": role, "text": text, "event": event})["saved"]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -77,6 +137,13 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def path_only(self):
         return urlsplit(self.path).path
+
+    def dialog_query(self):
+        query = parse_qs(urlsplit(self.path).query)
+        session = query.get("session", [None])[0]
+        raw_id = query.get("lead_id", [""])[0]
+        return (session if valid_session(session) else None,
+                int(raw_id) if re.fullmatch(r"[1-9]\d{0,9}", raw_id) else None)
 
     def respond(self, status, data, content_type):
         self.send_response(status)
@@ -90,9 +157,9 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, data):
         self.respond(status, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-    def payload(self):
+    def payload(self, max_size=MAX_BODY):
         size = int(self.headers.get("Content-Length", "0"))
-        if not 0 < size <= MAX_BODY:
+        if not 0 < size <= max_size:
             raise ValueError("Некорректный размер запроса")
         if self.headers.get_content_type() != "application/json":
             raise ValueError("Ожидается JSON")
@@ -104,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
 
 class CRMHandler(Handler):
     def authorize(self):
-        if self.path_only != "/api/leads":
+        if self.path_only not in ("/api/leads", "/api/dialog"):
             self.send_json(404, {"error": "Маршрут не найден"})
             return False
         token = self.headers.get("Authorization", "")
@@ -114,14 +181,33 @@ class CRMHandler(Handler):
         return True
 
     def do_GET(self):
-        if self.authorize():
+        if not self.authorize():
+            return
+        if self.path_only == "/api/leads":
             self.send_json(200, {"leads": self.server.store.list()})
+            return
+        session, lead_id = self.dialog_query()
+        if not session and not lead_id:
+            self.send_json(400, {"error": "Укажите диалог или номер заявки"})
+            return
+        self.send_json(200, self.server.store.dialog(session, lead_id))
 
     def do_POST(self):
         if not self.authorize():
             return
+        if self.path_only == "/api/dialog":
+            try:
+                item = self.payload()
+                lead, role, text, event = (item.get(key) for key in ("lead_id", "role", "text", "event"))
+                if type(lead) is not int or role not in ("user", "manager") or not valid_text(text) or not valid_session(event):
+                    raise ValueError("Проверьте заявку, участника и текст")
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)})
+            else:
+                self.send_json(200, {"saved": self.server.store.append(lead, role, text.strip(), event)})
+            return
         try:
-            payload = self.payload()
+            payload = self.payload(128 * 1024)
             request_id, name, phone = (payload.get(key) for key in ("request_id", "name", "phone"))
             request = payload.get("request", "")
             if not all(isinstance(value, str) for value in (request_id, name, phone)):
@@ -130,17 +216,29 @@ class CRMHandler(Handler):
                 raise ValueError("Проверьте имя и телефон")
             if not isinstance(request, str) or len(request) > 300:
                 raise ValueError("Комментарий должен быть короче 300 символов")
+            session, history, event = (payload.get(key) for key in ("session", "history", "event"))
+            if not valid_session(session) or not valid_session(event):
+                raise ValueError("Некорректный диалог")
+            if (not isinstance(history, list) or not 1 <= len(history) <= 20
+                    or any(not isinstance(item, dict) or item.get("role") not in ("user", "agent")
+                           or not valid_text(item.get("text"), 1500) for item in history)):
+                raise ValueError("Некорректная история диалога")
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
             return
-        self.send_json(200, self.server.store.create(request_id, name, phone, request))
+        self.send_json(200, self.server.store.create(request_id, name, phone, request, session, history, event))
 
 
 class DemoHandler(Handler):
     def do_GET(self):
-        if self.path_only == "/api/leads":
+        if self.path_only in ("/api/leads", "/api/dialog"):
             try:
-                result = self.server.agent.crm.list()
+                crm = self.server.agent.crm
+                if self.path_only == "/api/leads":
+                    result = crm.list()
+                else:
+                    session, lead_id = self.dialog_query()
+                    result = crm.dialog(session=session, lead_id=lead_id)
             except (URLError, TimeoutError, ValueError):
                 self.send_json(503, {"error": "Тестовая СРМ временно недоступна"})
             else:
@@ -159,20 +257,43 @@ class DemoHandler(Handler):
         self.respond(200, (WEB / name).read_bytes(), content_type)
 
     def do_POST(self):
+        if self.path_only == "/api/reply":
+            try:
+                payload = self.payload()
+                lead, text, event = (payload.get(key) for key in ("lead_id", "message", "event"))
+                if type(lead) is not int or not valid_text(text) or not valid_session(event):
+                    raise ValueError("Укажите заявку и сообщение до 1 000 символов")
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)})
+                return
+            try:
+                saved = self.server.agent.crm.append(lead, "manager", text, event)
+            except (URLError, TimeoutError, ValueError):
+                self.send_json(503, {"error": "СРМ пока не подтвердила запись ответа"})
+            else:
+                self.send_json(200 if saved else 409, {"saved": saved})
+            return
         if self.path_only != "/api/chat":
             self.send_json(404, {"error": "Маршрут не найден"})
             return
         try:
             data = self.payload()
             session, text = data.get("session"), data.get("message")
-            if not isinstance(session, str) or not re.fullmatch(r"[a-zA-Z0-9-]{16,80}", session):
+            if not valid_session(session):
                 raise ValueError("Некорректный диалог")
-            if not isinstance(text, str) or not 0 < len(text.strip()) <= 1000:
+            if not valid_text(text):
                 raise ValueError("Напишите сообщение до 1 000 символов")
+            event = data.get("event")
+            if event is not None and not valid_session(event):
+                raise ValueError("Некорректный номер сообщения")
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
             return
-        result = self.server.agent.chat(session, text)
+        try:
+            result = self.server.agent.chat(session, text, event)
+        except (URLError, TimeoutError, ValueError):
+            self.send_json(503, {"error": "СРМ пока не подтвердила запись сообщения"})
+            return
         self.send_json(200, result)
 
 
