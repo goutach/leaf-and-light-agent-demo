@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Лист и свет · консультант</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">
+      <p class="brand-name">Лист и свет</p>
+      <p class="brand-subtitle">Растения в аренду для офиса</p>
+    </header>
+    <div class="panels">
+      <section class="panel chat" aria-labelledby="chat-title">
+        <div class="panel-header">
+          <h1 id="chat-title">Чат с консультантом</h1>
+          <button id="reset" type="button" class="plain">Новый диалог</button>
+        </div>
+        <div id="history" role="log" aria-label="Переписка" tabindex="0"></div>
+        <div class="shortcuts" aria-label="Быстрые вопросы">
+          <button type="button" data-prompt="Сколько стоит аренда?">Цена</button>
+          <button type="button" data-prompt="Когда привезете растения?">Доставка</button>
+          <button type="button" data-prompt="Хочу оставить заявку">Оставить заявку</button>
+        </div>
+        <form id="chat-form">
+          <label class="visually-hidden" for="message">Сообщение</label>
+          <input id="message" name="message" placeholder="Напишите сообщение" autocomplete="off" maxlength="1000" required>
+          <button id="send" type="submit">Отправить</button>
+        </form>
+      </section>
+      <section class="panel crm" aria-labelledby="crm-title">
+        <div class="panel-header">
+          <div><h2 id="crm-title">Тестовая СРМ</h2><p class="muted">Заявки из чата</p></div>
+          <button type="button" class="plain" id="refresh">Обновить</button>
+        </div>
+        <div id="lead-list" aria-live="polite"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
