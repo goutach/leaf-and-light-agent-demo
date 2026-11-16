@@ -183,6 +183,37 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
         self.assertEqual(self.leads(), [])
 
+    def test_order_language_keeps_the_catalogue_and_the_extra_question(self):
+        result = self.chat("Хочу заказать 6 растений при рассеянном свете и как часто их поливают?")
+        self.assertEqual(result["kind"], "selection")
+        self.assertEqual(result["quote"]["options"][0]["monthly"], 8940)
+        self.assertIn("Раз в две недели", result["text"])
+        self.assertEqual(self.leads(), [])
+
+    def test_mixed_question_offers_handoff_for_the_unsupported_part(self):
+        result = self.chat("Можно оплатить по счету от юрлица? Сколько стоит аренда?")
+        self.assertIn("1 490 ₽", result["text"])
+        self.assertIn("Хотите, подключу менеджера?", result["text"])
+        self.assertEqual(self.chat("Да, давайте")["kind"], "contact")
+        self.chat("Анна +7 900 000-00-01")
+        self.assertEqual(self.leads()[0]["request"], "Можно оплатить по счету от юрлица?")
+
+    def test_greeting_is_not_an_unanswered_question(self):
+        result = self.chat("Здравствуйте! Сколько стоит аренда?")
+        self.assertEqual(result["text"], FAQ[1]["answer"])
+        self.assertFalse(result["offer_handoff"])
+
+    def test_unsent_dialog_can_be_restored_in_the_same_session(self):
+        self.chat("Нужно 6 растений, свет рассеянный.")
+        own = request(self.url + "/api/dialog?session=demo-test-session-001")
+        other = request(self.url + "/api/dialog?session=demo-test-session-002")
+        self.assertIsNone(own["lead_id"])
+        self.assertIn("8 940 ₽", own["messages"][-1]["text"])
+        self.assertEqual(own["messages"][-1]["quote"]["options"][0]["monthly"], 8940)
+        self.assertEqual(other["messages"], [])
+        self.assertEqual(self.chat("А если 8?")["quote"]["options"][0]["monthly"], 11920)
+        self.assertEqual(self.leads(), [])
+
     def test_model_output_cannot_override_catalogue(self):
         calls = []
 

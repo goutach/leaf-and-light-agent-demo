@@ -117,8 +117,9 @@ function renderTranscript(panel, messages) {
     const label = document.createElement('small');
     label.textContent = labels[item.role];
     const message = document.createElement('p');
-    message.textContent = item.text;
+    message.textContent = item.display_text ?? item.text;
     row.append(label, message);
+    if (item.quote) row.append(quoteCard(item.quote));
     return row;
   }));
   panel.scrollTop = panel.scrollHeight;
@@ -127,7 +128,11 @@ function renderTranscript(panel, messages) {
 async function refreshClientDialog() {
   const current = session;
   const dialog = await request('/api/dialog?' + new URLSearchParams({session: current}));
-  if (current !== session || !dialog.lead_id) return;
+  if (current !== session) return;
+  if (!dialog.lead_id) {
+    if (!ownedLead && !busy && dialog.messages.length) renderTranscript(historyPanel, dialog.messages);
+    return;
+  }
   ownedLead = dialog.lead_id;
   chatStatus.textContent = `Заявка №${ownedLead} · передано менеджеру`;
   chatStatus.hidden = false;

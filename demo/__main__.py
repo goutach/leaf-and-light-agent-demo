@@ -248,7 +248,7 @@ class DemoHandler(Handler):
                     result = crm.list()
                 else:
                     session, lead_id = self.dialog_query()
-                    result = crm.dialog(session=session, lead_id=lead_id)
+                    result = self.server.agent.read_dialog(session) if session and not lead_id else crm.dialog(lead_id=lead_id)
             except (URLError, TimeoutError, ValueError):
                 self.send_json(503, {"error": "Тестовая СРМ временно недоступна"})
             else:

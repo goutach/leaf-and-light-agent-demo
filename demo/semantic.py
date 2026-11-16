@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from .agent import FAQ, route_by_keywords
+from .agent import FAQ, route_by_keywords, split_turn
 
 
 MODEL_REPO = "Xenova/multilingual-e5-small"
@@ -11,7 +11,6 @@ MODEL_PATH = "onnx/model_quantized.onnx"
 MODEL_ASSETS = ("tokenizer.json", MODEL_PATH)
 FOLLOWUP = re.compile(r"^(а\s|и\s|тогда\s|а если\s)", re.IGNORECASE)
 REFERENCE = re.compile(r"\b(туда|сюда|это|эти|их|ними|тогда|периодичностью)\b", re.IGNORECASE)
-SPLIT = re.compile(r"[?;.!]\s+|\s+(?:и|а)\s+(?=(?:кто|как(?:ой|ая|ие)?|сколько|когда|где|что)\b)", re.IGNORECASE)
 PARAPHRASES = {
     "minimum": "Можно ли взять только одно дерево? Какое минимальное количество кашпо?",
     "price": "Во сколько обходится аренда одного цветка в месяц? Какой ежемесячный платеж? Что входит в абонплату?",
@@ -68,7 +67,14 @@ class SemanticRouter:
         return vectors / np.linalg.norm(vectors, axis=1, keepdims=True).clip(min=1e-9)
 
     def __call__(self, message, previous=""):
-        pieces = [part.strip() for part in SPLIT.split(message) if part.strip()][:3]
+        records, _ = self.find_facts(message, previous)
+        return records
+
+    def find_facts(self, message, previous=""):
+        pieces = split_turn(message)
+        pending = []
+        remainder = pieces[3:]
+        pieces = pieces[:3]
         expanded = []
         for part in pieces:
             alternatives = [part]
@@ -78,7 +84,7 @@ class SemanticRouter:
             expanded.append(alternatives)
         vectors = iter(self.embed(["query: " + query for group in expanded for query in group]))
         records = []
-        for group in expanded:
+        for part, group in zip(pieces, expanded):
             candidates = []
             for index, _ in enumerate(group):
                 scores = self.matrix @ next(vectors)
@@ -88,18 +94,23 @@ class SemanticRouter:
             hint = route_by_keywords(group[0])
             # Уверенная внешняя тема сохраняет приоритет, даже если в прошлом вопросе был подходящий ответ.
             if match >= len(FAQ) and margin >= .012:
+                pending.append(part)
                 continue
             use_context = score < .84 or margin < .012 or REFERENCE.search(group[0])
             if not hint and use_context and len(candidates) == 2:
                 score, margin, match, context_used = candidates[1]
             if match >= len(FAQ):
+                pending.append(part)
                 continue
             faq_id = FAQ[match]["id"]
             if hint and faq_id != hint:
+                pending.append(part)
                 continue
             prior_hint = route_by_keywords(previous) if context_used else None
             margin_ok = margin >= .012 or (faq_id == hint and margin >= .003) or (faq_id == prior_hint and score >= .88)
             if score >= .84 and margin_ok:
                 if faq_id not in [row["id"] for row in records]:
                     records.append({"id": faq_id, "score": round(score, 3), "context": context_used})
-        return records[:2]
+            else:
+                pending.append(part)
+        return records, pending + remainder
