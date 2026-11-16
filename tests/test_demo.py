@@ -93,7 +93,7 @@ class DemoTest(unittest.TestCase):
     def test_model_output_cannot_override_catalogue(self):
         calls = []
 
-        def router(message):
+        def router(message, _previous):
             calls.append(message)
             return "price" if "аренда" in message else "Итог 100 рублей"
 

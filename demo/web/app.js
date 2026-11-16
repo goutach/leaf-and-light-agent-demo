@@ -9,16 +9,22 @@ const refresh = document.querySelector('#refresh');
 let session = crypto.randomUUID();
 let busy = false;
 
-function entry(who, text, source = '') {
+function entry(who, text, sources = [], mode = '', usesContext = false) {
   const row = document.createElement('div');
   row.className = `turn ${who}`;
   const message = document.createElement('p');
   message.textContent = text;
   row.append(message);
-  if (source) {
+  for (const source of sources) {
     const reference = document.createElement('small');
     reference.textContent = `Из справочника · ${source}`;
     row.append(reference);
+  }
+  if (mode) {
+    const evidence = document.createElement('small');
+    evidence.className = 'route';
+    evidence.textContent = mode + (usesContext ? ' · учтен предыдущий вопрос' : '');
+    row.append(evidence);
   }
   historyPanel.append(row);
   historyPanel.scrollTop = historyPanel.scrollHeight;
@@ -55,8 +61,14 @@ async function updateLeads() {
       const name = document.createElement('strong');
       name.textContent = lead.name;
       const phone = document.createElement('span');
-      phone.textContent = lead.phone;
+      phone.textContent = lead.phone.replace(/^(\+7)(\d{3})(\d{3})(\d{2})(\d{2})$/, '$1 $2 $3-$4-$5');
       row.append(label, name, phone);
+      if (lead.request) {
+        const request = document.createElement('p');
+        request.className = 'lead-request';
+        request.textContent = lead.request;
+        row.append(request);
+      }
       leadList.append(row);
     }
   } catch {
@@ -80,7 +92,7 @@ async function send(text) {
       body: JSON.stringify({session, message: text}),
     });
     pending.remove();
-    entry('agent', result.text, result.source);
+    entry('agent', result.text, result.sources, result.mode, result.trace?.some(row => row.context));
     if (result.kind === 'lead') await updateLeads();
   } catch {
     row.remove();

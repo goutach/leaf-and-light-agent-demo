@@ -29,23 +29,26 @@ class LeadStore:
                 request_id TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL,
                 phone TEXT NOT NULL,
+                request TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )""")
+            if "request" not in {row["name"] for row in db.execute("PRAGMA table_info(leads)")}:
+                db.execute("ALTER TABLE leads ADD COLUMN request TEXT NOT NULL DEFAULT ''")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
         return db
 
-    def create(self, request_id, name, phone):
+    def create(self, request_id, name, phone, request):
         with closing(self.connect()) as db, db:
-            db.execute("""INSERT INTO leads (request_id,name,phone,created_at) VALUES (?,?,?,?)
-                ON CONFLICT(request_id) DO NOTHING""", (request_id, name, phone, datetime.now(timezone.utc).isoformat(timespec="seconds")))
-            return dict(db.execute("SELECT id,name,phone,created_at FROM leads WHERE request_id=?", (request_id,)).fetchone())
+            db.execute("""INSERT INTO leads (request_id,name,phone,request,created_at) VALUES (?,?,?,?,?)
+                ON CONFLICT(request_id) DO NOTHING""", (request_id, name, phone, request, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            return dict(db.execute("SELECT id,name,phone,request,created_at FROM leads WHERE request_id=?", (request_id,)).fetchone())
 
     def list(self):
         with closing(self.connect()) as db:
-            return [dict(row) for row in db.execute("SELECT id,name,phone,created_at FROM leads ORDER BY id DESC LIMIT 30")]
+            return [dict(row) for row in db.execute("SELECT id,name,phone,request,created_at FROM leads ORDER BY id DESC LIMIT 30")]
 
 
 class CRMClient:
@@ -60,8 +63,8 @@ class CRMClient:
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
-    def create(self, request_id, name, phone):
-        return self.request({"request_id": request_id, "name": name, "phone": phone})
+    def create(self, request_id, name, phone, request):
+        return self.request({"request_id": request_id, "name": name, "phone": phone, "request": request})
 
     def list(self):
         return self.request()
@@ -120,14 +123,17 @@ class CRMHandler(Handler):
         try:
             payload = self.payload()
             request_id, name, phone = (payload.get(key) for key in ("request_id", "name", "phone"))
+            request = payload.get("request", "")
             if not all(isinstance(value, str) for value in (request_id, name, phone)):
                 raise ValueError("Нужны ключ запроса, имя и телефон")
             if not re.fullmatch(r"[a-f0-9]{64}", request_id) or not NAME.fullmatch(name) or not re.fullmatch(r"\+7\d{10}", phone):
                 raise ValueError("Проверьте имя и телефон")
+            if not isinstance(request, str) or len(request) > 300:
+                raise ValueError("Комментарий должен быть короче 300 символов")
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
             return
-        self.send_json(200, self.server.store.create(request_id, name, phone))
+        self.send_json(200, self.server.store.create(request_id, name, phone, request))
 
 
 class DemoHandler(Handler):
@@ -189,8 +195,14 @@ def main():
     parser.add_argument("--port", type=int, default=0, help="Порт интерфейса, 0 выбирает свободный")
     parser.add_argument("--crm-port", type=int, default=0)
     parser.add_argument("--db", type=Path, default=Path("data/leads.sqlite3"))
+    parser.add_argument("--semantic", action="store_true", help="Локальная нейросеть для поиска по справочнику")
     args = parser.parse_args()
-    app, crm = build_servers(args.port, args.crm_port, args.db, configured_router())
+    if args.semantic:
+        from .semantic import SemanticRouter
+        router = SemanticRouter()
+    else:
+        router = configured_router()
+    app, crm = build_servers(args.port, args.crm_port, args.db, router)
     worker = Thread(target=crm.serve_forever, name="demo-crm")
     worker.start()
     print(f"UI: http://127.0.0.1:{app.server_port}", flush=True)
