@@ -139,6 +139,50 @@ class DemoTest(unittest.TestCase):
         self.assertEqual(self.chat("отмена")["text"], "Хорошо, заявку не отправляю.")
         self.assertEqual(self.leads(), [])
 
+    def test_catalogue_recalculation_and_saved_snapshot(self):
+        initial = self.chat("Нужно шесть растений в переговорную, свет рассеянный, бюджет до 10 000 ₽")
+        first_quote = initial["quote"]
+        self.assertEqual(first_quote["input"], {"quantity": 6, "light": "diffuse", "budget": 10000})
+        self.assertEqual([(p["sku"], p["monthly"]) for p in first_quote["options"]], [("SAN", 8940)])
+        higher = self.chat("А если 8?")["quote"]
+        self.assertFalse(higher["fits"])
+        self.assertEqual(higher["options"][0]["monthly"], 11920)
+        self.assertEqual(higher["input"]["budget"], 10000)
+        self.assertEqual(self.chat("А если восемь растений?")["quote"], higher)
+        self.assertEqual(self.chat("Тогда 6")["quote"], first_quote)
+        self.assertEqual(self.chat("Когда привезете 6 растений?")["kind"], "faq")
+        self.assertEqual(self.chat("Можно оплатить по счету от юрлица?")["kind"], "unknown")
+        self.chat("Позовите менеджера")
+        self.chat("Анна")
+        self.assertEqual(self.leads(), [])
+        self.chat("+7 900 000-00-01")
+        lead, = LeadStore(self.path).list()
+        self.assertEqual(lead["quote"], first_quote)
+        self.assertEqual(lead["request"], "Можно оплатить по счету от юрлица?")
+        dialog = request(self.url + "/api/dialog?lead_id=1")
+        self.assertTrue(any("11 920 ₽" in row["text"] for row in dialog["messages"]))
+
+    def test_catalogue_asks_only_for_missing_input(self):
+        self.assertEqual(self.chat("Нужно ли поливать растения?")["kind"], "faq")
+        self.assertEqual(self.chat("Хочу подобрать растения для офиса")["text"], "Сколько растений нужно?")
+        response = self.chat("6")
+        self.assertIn("со светом", response["text"])
+        self.assertIsNone(response["quote"])
+        result = self.chat("Совсем без света")
+        self.assertIsNone(result["quote"])
+        self.assertIn("подсветку", result["text"])
+        self.assertEqual(len(self.chat("Хорошо освещенная комната")["quote"]["options"]), 3)
+
+    def test_crm_rejects_a_modified_price(self):
+        quote = self.chat("Нужно 6 растений в офис, свет рассеянный")["quote"]
+        quote["options"][0]["monthly"] = 1
+        with self.assertRaises(HTTPError) as error:
+            self.app.agent.crm.create("a" * 64, "Анна", "+79000000001", "Офис",
+                                      "demo-test-session-001", [{"role": "user", "text": "Анна"}],
+                                      "demo-test-event-0001", quote)
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(self.leads(), [])
+
     def test_model_output_cannot_override_catalogue(self):
         calls = []
 

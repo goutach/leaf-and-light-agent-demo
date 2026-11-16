@@ -3,8 +3,8 @@
   color: #18372d;
   background: #edf2ea;
   font-synthesis: none;
-  --line: #dce6da;
-  --green: #1b5a42;
+  --line: #dce5d5;
+  --green: #184d39;
   --muted: #53695d;
 }
 *, *::before, *::after { box-sizing: border-box; }
@@ -19,7 +19,7 @@ p, h1, h2, h3 { margin: 0; }
 .brand-name { font: 52px/1 "Instrument Serif", Georgia, serif; letter-spacing: -.035em; }
 .brand-subtitle { margin-top: 9px; color: var(--muted); font-size: 16px; }
 .panels { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); align-items: start; gap: 19px; }
-.panel { background: #fffefa; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
+.panel { background: #fffefa; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: 0 10px 34px #273a2010; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 68px; padding: 15px 22px; border-bottom: 1px solid var(--line); }
 h1, h2 { font-size: 20px; line-height: 1.2; letter-spacing: -.02em; }
 .muted { color: var(--muted); margin-top: 5px; font-size: 14px; }
@@ -46,6 +46,15 @@ h1, h2 { font-size: 20px; line-height: 1.2; letter-spacing: -.02em; }
 .lead small { color: var(--muted); }
 .lead .plain { justify-self: start; padding-bottom: 2px; }
 .lead-request { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 8px; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.quote-card { margin-top: 10px; padding: 10px 12px; border: 1px solid #d6e5cf; border-radius: 11px; color: #18372d; background: #fbfdf8; font-size: 14px; }
+.quote-title { display: block; font-size: 13px; }
+.quote-context { margin: 3px 0 7px; color: #546654; font-size: 12px; }
+.quote-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 15px; padding: 7px 0 3px; border-top: 1px solid var(--line); }
+.quote-option strong { color: #184d39; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.quote-option small { grid-column: 1 / -1; margin: 0; }
+.quote-warning { display: inline-block; margin-top: 5px; color: #724113; background: #faeedb; padding: 2px 7px; border-radius: 4px; font-size: 12px; }
+.quote-compact { margin: 3px 0; }
+.quote-compact .quote-option { font-size: 13px; }
 #manager-dialog { border-top: 1px solid var(--line); }
 #manager-title { padding: 14px 18px 10px; font-size: 15px; }
 #manager-history { height: 185px; padding: 8px 13px; overflow: auto; display: flex; flex-direction: column; gap: 7px; }

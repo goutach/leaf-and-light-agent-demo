@@ -1,0 +1,13 @@
+{
+  "minimum": 3,
+  "lights": {
+    "diffuse": "рассеянный свет",
+    "bright": "хорошо освещенное помещение",
+    "none": "без света"
+  },
+  "products": [
+    {"sku": "SAN", "name": "Сансевиерия", "monthly": 1490, "lights": ["diffuse", "bright"]},
+    {"sku": "ZAM", "name": "Замиокулькас", "monthly": 1690, "lights": ["diffuse", "bright"]},
+    {"sku": "FIC", "name": "Фикус эластика", "monthly": 1990, "lights": ["bright"]}
+  ]
+}

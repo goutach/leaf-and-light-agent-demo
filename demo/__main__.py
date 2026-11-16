@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .agent import Agent, HANDOFF_CONFIRMED, NAME, configured_router
+from .catalogue import check_snapshot
 
 
 WEB = Path(__file__).with_name("web")
@@ -46,6 +47,8 @@ class LeadStore:
                 db.execute("ALTER TABLE leads ADD COLUMN request TEXT NOT NULL DEFAULT ''")
             if "session" not in columns:
                 db.execute("ALTER TABLE leads ADD COLUMN session TEXT")
+            if "quote" not in columns:
+                db.execute("ALTER TABLE leads ADD COLUMN quote TEXT")
             db.executescript("""
                 CREATE UNIQUE INDEX IF NOT EXISTS leads_session ON leads(session);
                 CREATE TABLE IF NOT EXISTS lead_messages (
@@ -65,11 +68,12 @@ class LeadStore:
         db.execute("PRAGMA foreign_keys = ON")
         return db
 
-    def create(self, request_id, name, phone, request, session, history, event):
+    def create(self, request_id, name, phone, request, session, history, event, quote):
+        stored_quote = json.dumps(quote, ensure_ascii=False) if quote is not None else None
         with closing(self.connect()) as db, db:
-            created = db.execute("""INSERT INTO leads (request_id,name,phone,request,created_at,session)
-                VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING""",
-                (request_id, name, phone, request, datetime.now(timezone.utc).isoformat(timespec="seconds"), session))
+            created = db.execute("""INSERT INTO leads (request_id,name,phone,request,created_at,session,quote)
+                VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""",
+                (request_id, name, phone, request, datetime.now(timezone.utc).isoformat(timespec="seconds"), session, stored_quote))
             lead = db.execute("SELECT id FROM leads WHERE session=?", (session,)).fetchone()
             if created.rowcount:
                 db.executemany("INSERT INTO lead_messages (lead_id,role,text,event) VALUES (?,?,?,?)",
@@ -81,8 +85,9 @@ class LeadStore:
 
     def list(self):
         with closing(self.connect()) as db:
-            return [dict(row) for row in db.execute("""SELECT id,name,phone,request,created_at,
-                session IS NOT NULL AS has_dialog FROM leads ORDER BY id DESC LIMIT 30""")]
+            rows = db.execute("""SELECT id,name,phone,request,created_at,quote,
+                session IS NOT NULL AS has_dialog FROM leads ORDER BY id DESC LIMIT 30""")
+            return [{**row, "quote": json.loads(row["quote"]) if row["quote"] else None} for row in rows]
 
     def dialog(self, session, lead_id):
         with closing(self.connect()) as db:
@@ -117,9 +122,9 @@ class CRMClient:
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
-    def create(self, request_id, name, phone, request, session, history, event):
+    def create(self, request_id, name, phone, request, session, history, event, quote):
         return self.request("leads", {"request_id": request_id, "name": name, "phone": phone, "request": request,
-                                      "session": session, "history": history, "event": event})
+                                      "session": session, "history": history, "event": event, "quote": quote})
 
     def list(self):
         return self.request("leads")
@@ -219,6 +224,9 @@ class CRMHandler(Handler):
             if not isinstance(request, str) or len(request) > 300:
                 raise ValueError("Комментарий должен быть короче 300 символов")
             session, history, event = (payload.get(key) for key in ("session", "history", "event"))
+            quote = payload.get("quote")
+            if quote is not None:
+                quote = check_snapshot(quote)
             if not valid_session(session) or not valid_session(event):
                 raise ValueError("Некорректный диалог")
             if (not isinstance(history, list) or not 1 <= len(history) <= 20
@@ -228,7 +236,7 @@ class CRMHandler(Handler):
         except ValueError as error:
             self.send_json(400, {"error": str(error)})
             return
-        self.send_json(200, self.server.store.create(request_id, name, phone, request, session, history, event))
+        self.send_json(200, self.server.store.create(request_id, name, phone, request, session, history, event, quote))
 
 
 class DemoHandler(Handler):

@@ -3,15 +3,19 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass
+from _thread import LockType
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
+from .catalogue import Brief, MINIMUM, UNIT_PRICE, estimate, read_brief, rubles, summarize
 
 FAQ = json.loads(Path(__file__).with_name("faq.json").read_text(encoding="utf-8"))
+for item in FAQ:
+    item["answer"] = item["answer"].format(minimum=MINIMUM, price=rubles(UNIT_PRICE))
 UNKNOWN = "Тут точных условий не подскажу. Хотите, подключу менеджера?"
 HANDOFF_CONFIRMED = "Передал переписку менеджеру. Дальше можно писать прямо сюда."
 PHONE = re.compile(r"(?<!\d)(?:\+7|8)[\s(\-]*\d{3}[\s)\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)")
@@ -118,55 +122,69 @@ class Contact:
     awaiting_confirmation: bool = False
 
 
+@dataclass(slots=True)
+class Dialogue:
+    lock: LockType = field(default_factory=threading.Lock)
+    history: list = field(default_factory=list)
+    question: str = ""
+    unanswered: str = ""
+    brief: Brief | None = None
+    quote: dict | None = None
+    contact: Contact | None = None
+
+    def clear(self):
+        self.history.clear()
+        self.question = self.unanswered = ""
+        self.brief = self.quote = self.contact = None
+
+
 class Agent:
     def __init__(self, crm, router=None):
         self.crm = crm
         self.router = router
         self.faq = {row["id"]: row for row in FAQ}
-        self.contacts = {}
-        self.questions = {}
-        self.unanswered = {}
-        self.history = {}
-        self.session_locks = {}
-        self.lock = threading.RLock()
+        self.dialogues = {}
+        self.lock = threading.Lock()
 
     def chat(self, session, message, event=None):
         with self.lock:
-            session_lock = self.session_locks.setdefault(session, threading.Lock())
-        with session_lock:
-            return self._chat(session, message.strip(), event or str(uuid4()))
+            dialogue = self.dialogues.get(session)
+            if dialogue is None:
+                dialogue = self.dialogues[session] = Dialogue()
+        with dialogue.lock:
+            return self._chat(session, dialogue, message.strip(), event or str(uuid4()))
 
-    def _chat(self, session, message, event):
+    def _chat(self, session, dialogue, message, event):
         saved = self.crm.dialog(session=session)
         if saved["lead_id"]:
             lead_id = saved["lead_id"]
-            pending = self.contacts.pop(session, None)
-            self.history.pop(session, None)
-            self.questions.pop(session, None)
-            self.unanswered.pop(session, None)
+            pending = dialogue.contact
+            dialogue.clear()
             if pending and pending.awaiting_confirmation and message.casefold() == "повторить":
                 return self._receipt(lead_id)
             if not self.crm.append(lead_id, "user", message, event):
                 raise ValueError("Сообщение не сохранено")
             return {"kind": "manager", "lead_id": lead_id}
 
-        history = self.history.setdefault(session, [])
+        history = dialogue.history
         history.append({"role": "user", "text": message})
         if len(history) > 20:
             del history[:-20]
-        result = self._answer(session, message, event, history)
+        result = self._answer(session, dialogue, message, event)
         if result["kind"] == "lead":
-            self.history.pop(session, None)
-            self.questions.pop(session, None)
-            self.unanswered.pop(session, None)
+            dialogue.clear()
         else:
-            history.append({"role": "agent", "text": result["text"]})
+            saved_text = result["text"]
+            if result.get("quote"):
+                saved_text += "\n\n" + summarize(result["quote"])
+            history.append({"role": "agent", "text": saved_text})
         return result
 
-    def _answer(self, session, message, event, history):
+    def _answer(self, session, dialogue, message, event):
         number = PHONE.search(message)
         named = NAMED.search(message)
         words = message.casefold().strip(" .!?")
+        history = dialogue.history
         offered = len(history) >= 2 and history[-2]["text"] == UNKNOWN
         manager = MANAGER.search(message)
         if manager and NON_ACTION.search(message):
@@ -176,16 +194,23 @@ class Agent:
         if words in {"здравствуйте", "добрый день", "привет"}:
             return {"kind": "chat", "text": "Здравствуйте! Что подсказать по растениям?"}
         if manager or (offered and words in YES):
-            request = self.unanswered.get(session) or self.questions.get(session, "")
-            self.contacts.setdefault(session, Contact(request=request))
-            return self._contact(session, message, number, named, event, history)
-        contact = self.contacts.get(session)
+            if dialogue.contact is None:
+                dialogue.contact = Contact(request=dialogue.unanswered or dialogue.question)
+            return self._contact(session, dialogue, message, number, named, event)
         if CONTACT.search(message) or number or named or words in CANCEL:
-            return self._contact(session, message, number, named, event, history)
-        if contact and (words == "повторить" or (not QUESTION_WORDS.search(message) and "?" not in message)):
-            return self._contact(session, message, number, named, event, history)
+            return self._contact(session, dialogue, message, number, named, event)
 
-        previous = self.questions.get(session, "")
+        brief = read_brief(message, dialogue.brief)
+        if brief is not None:
+            if dialogue.brief is None:
+                dialogue.question = message
+            dialogue.brief = brief
+            text, dialogue.quote = estimate(brief)
+            return {"kind": "selection", "text": text, "quote": dialogue.quote}
+        if dialogue.contact and (words == "повторить" or (not QUESTION_WORDS.search(message) and "?" not in message)):
+            return self._contact(session, dialogue, message, number, named, event)
+
+        previous = dialogue.question
         trace = []
         mode = "Локальный поиск по словам"
         if self.router:
@@ -200,19 +225,21 @@ class Agent:
         items = [self.faq[row["id"]] for row in trace if isinstance(row.get("id"), str) and row["id"] in self.faq]
         if items:
             if not any(row.get("context") for row in trace):
-                self.questions[session] = message
-                self.unanswered.pop(session, None)
+                dialogue.question = message
+                dialogue.unanswered = ""
             return {"kind": "faq", "text": "\n\n".join(catalogue_answer(item, message, len(items) == 1) for item in items),
                     "source": items[0]["question"], "sources": [item["question"] for item in items],
                     "trace": trace, "mode": mode}
-        self.unanswered[session] = message
+        dialogue.unanswered = message
         return {"kind": "unknown", "text": UNKNOWN, "mode": mode}
 
-    def _contact(self, session, message, number, named, event, history):
+    def _contact(self, session, dialogue, message, number, named, event):
         if message.casefold().strip(" .!?") in CANCEL:
-            self.contacts.pop(session, None)
+            dialogue.contact = None
             return {"kind": "chat", "text": "Хорошо, заявку не отправляю."}
-        contact = self.contacts.setdefault(session, Contact(request=self.questions.get(session, "")))
+        if dialogue.contact is None:
+            dialogue.contact = Contact(request=dialogue.unanswered or dialogue.question)
+        contact = dialogue.contact
         if named and named.start() > 0:
             contact.request = message[:named.start()].strip(" ,.!—-:")[:300]
         if number:
@@ -235,11 +262,11 @@ class Agent:
         request_id = hashlib.sha256(f"{session}\n{contact.name.casefold()}\n{contact.phone}".encode()).hexdigest()
         try:
             lead_id = self.crm.create(request_id, contact.name, contact.phone, contact.request[:300],
-                                      session, history, event)["id"]
+                                      session, dialogue.history, event, dialogue.quote)["id"]
         except (URLError, TimeoutError, ValueError, KeyError, TypeError):
             contact.awaiting_confirmation = True
             return {"kind": "contact", "text": "Пока не вижу, что заявка сохранилась. Напишите «повторить», я проверю запись."}
-        del self.contacts[session]
+        dialogue.contact = None
         return self._receipt(lead_id)
 
     @staticmethod

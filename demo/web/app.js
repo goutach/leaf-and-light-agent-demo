@@ -23,12 +23,48 @@ let managerRetry = null;
 let managerBusy = false;
 let busy = false;
 
-function entry(who, text, sources = [], mode = '', usesContext = false) {
+const currency = new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 0});
+const rubles = value => `${currency.format(value)} ₽`;
+
+function quoteCard(quote, compact = false) {
+  const {quantity, budget} = quote.input;
+  const card = document.createElement('div');
+  card.className = 'quote-card' + (compact ? ' quote-compact' : '');
+  const title = document.createElement('strong');
+  title.className = 'quote-title';
+  title.textContent = compact ? 'Подбор из диалога' : 'Подбор по каталогу';
+  const context = document.createElement('p');
+  context.className = 'quote-context';
+  context.textContent = [`${quantity} шт.`, quote.light, budget == null ? null : `до ${rubles(budget)}`].filter(Boolean).join(' · ');
+  card.append(title, context);
+  for (const option of quote.options) {
+    const row = document.createElement('div');
+    row.className = 'quote-option';
+    const name = document.createElement('span');
+    name.textContent = option.name;
+    const value = document.createElement('strong');
+    value.textContent = `${rubles(option.monthly)}/мес`;
+    const units = document.createElement('small');
+    units.textContent = `${quantity} × ${rubles(option.unit)}`;
+    row.append(name, value, units);
+    card.append(row);
+  }
+  if (!quote.fits) {
+    const status = document.createElement('span');
+    status.className = 'quote-warning';
+    status.textContent = 'Выше бюджета';
+    card.append(status);
+  }
+  return card;
+}
+
+function entry(who, text, sources = [], mode = '', usesContext = false, quote = null) {
   const row = document.createElement('div');
   row.className = `turn ${who}`;
   const message = document.createElement('p');
   message.textContent = text;
   row.append(message);
+  if (quote) row.append(quoteCard(quote));
   if (sources.length) {
     const evidence = document.createElement('details');
     evidence.className = 'evidence';
@@ -56,7 +92,7 @@ function entry(who, text, sources = [], mode = '', usesContext = false) {
 function welcome() {
   historyPanel.replaceChildren();
   historyPanel.dataset.snapshot = '';
-  entry('agent', 'Здравствуйте! Подскажу по аренде и уходу за растениями.');
+  entry('agent', 'Здравствуйте! Помогу подобрать растения для офиса и посчитать аренду.');
 }
 
 async function request(url, options) {
@@ -148,6 +184,7 @@ async function updateLeads() {
         request.textContent = lead.request;
         row.append(request);
       }
+      if (lead.quote) row.append(quoteCard(lead.quote, true));
       if (lead.has_dialog) {
         const open = document.createElement('button');
         open.type = 'button';
@@ -185,7 +222,7 @@ async function send(text) {
       if (result.kind === 'lead') await updateLeads();
       if (selectedLead === ownedLead) await refreshManagerDialog(ownedLead);
     } else {
-      entry('agent', result.text, result.sources, result.mode, result.trace?.some(row => row.context));
+      entry('agent', result.text, result.sources, result.mode, result.trace?.some(row => row.context), result.quote);
     }
   } catch {
     row.remove();
